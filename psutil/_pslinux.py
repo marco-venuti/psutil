@@ -1341,68 +1341,84 @@ def sensors_battery():
                 return int(ret) if ret.isdigit() else ret
         return None
 
-    bats = [x for x in os.listdir(POWER_SUPPLY_PATH) if x.startswith('BAT')]
+    bats = sorted([x for x in os.listdir(POWER_SUPPLY_PATH) if x.startswith('BAT')])
     if not bats:
         return None
-    # Get the first available battery. Usually this is "BAT0", except
-    # some rare exceptions:
-    # https://github.com/giampaolo/psutil/issues/1238
-    root = os.path.join(POWER_SUPPLY_PATH, sorted(bats)[0])
 
-    # Base metrics.
-    energy_now = multi_cat(
-        root + "/energy_now",
-        root + "/charge_now")
-    power_now = multi_cat(
-        root + "/power_now",
-        root + "/current_now")
-    energy_full = multi_cat(
-        root + "/energy_full",
-        root + "/charge_full")
-    if energy_now is None or power_now is None:
+    percent = []
+    secsleft = []
+    power_plugged = []
+
+    for bat in bats:
+        root = os.path.join(POWER_SUPPLY_PATH, bat)
+
+        # Base metrics.
+        energy_now = multi_cat(
+            root + "/energy_now",
+            root + "/charge_now")
+        power_now = multi_cat(
+            root + "/power_now",
+            root + "/current_now")
+        energy_full = multi_cat(
+            root + "/energy_full",
+            root + "/charge_full")
+
+        if energy_now is None or power_now is None:
+            continue
+
+        # Percent. If we have energy_full the percentage will be more
+        # accurate compared to reading /capacity file (float vs. int).
+        if energy_full is not None:
+            try:
+                _percent = 100.0 * energy_now / energy_full
+            except ZeroDivisionError:
+                _percent = 0.0
+        else:
+            _percent = int(cat(root + "/capacity", fallback=-1))
+            if _percent == -1:
+                continue
+
+        percent.append(_percent)
+
+        # Is AC power cable plugged in?
+        # Note: AC0 is not always available and sometimes (e.g. CentOS7)
+        # it's called "AC".
+        _power_plugged = None
+        online = multi_cat(
+            os.path.join(POWER_SUPPLY_PATH, "AC0/online"),
+            os.path.join(POWER_SUPPLY_PATH, "AC/online"))
+        if online is not None:
+            _power_plugged = online == 1
+        else:
+            status = cat(root + "/status", fallback="", binary=False).lower()
+            if status == "discharging":
+                _power_plugged = False
+            elif status in ("charging", "full"):
+                _power_plugged = True
+
+        power_plugged.append(_power_plugged)
+
+        # Seconds left.
+        # Note to self: we may also calculate the charging ETA as per:
+        # https://github.com/thialfihar/dotfiles/blob/
+        #     013937745fd9050c30146290e8f963d65c0179e6/bin/battery.py#L55
+        if _power_plugged:
+            _secsleft = _common.POWER_TIME_UNLIMITED
+        else:
+            try:
+                _secsleft = int(energy_now / power_now * 3600)
+            except ZeroDivisionError:
+                _secsleft = _common.POWER_TIME_UNKNOWN
+
+        secsleft.append(_secsleft)
+
+    if len(percent) == 0:
         return None
-
-    # Percent. If we have energy_full the percentage will be more
-    # accurate compared to reading /capacity file (float vs. int).
-    if energy_full is not None:
-        try:
-            percent = 100.0 * energy_now / energy_full
-        except ZeroDivisionError:
-            percent = 0.0
     else:
-        percent = int(cat(root + "/capacity", fallback=-1))
-        if percent == -1:
-            return None
-
-    # Is AC power cable plugged in?
-    # Note: AC0 is not always available and sometimes (e.g. CentOS7)
-    # it's called "AC".
-    power_plugged = None
-    online = multi_cat(
-        os.path.join(POWER_SUPPLY_PATH, "AC0/online"),
-        os.path.join(POWER_SUPPLY_PATH, "AC/online"))
-    if online is not None:
-        power_plugged = online == 1
-    else:
-        status = cat(root + "/status", fallback="", binary=False).lower()
-        if status == "discharging":
-            power_plugged = False
-        elif status in ("charging", "full"):
-            power_plugged = True
-
-    # Seconds left.
-    # Note to self: we may also calculate the charging ETA as per:
-    # https://github.com/thialfihar/dotfiles/blob/
-    #     013937745fd9050c30146290e8f963d65c0179e6/bin/battery.py#L55
-    if power_plugged:
-        secsleft = _common.POWER_TIME_UNLIMITED
-    else:
-        try:
-            secsleft = int(energy_now / power_now * 3600)
-        except ZeroDivisionError:
-            secsleft = _common.POWER_TIME_UNKNOWN
-
-    return _common.sbattery(percent, secsleft, power_plugged)
+        return [
+            (bat, _common.sbattery(percent[i], secsleft[i], power_plugged[i]))
+            for i, bat in enumerate(bats)
+        ]
 
 
 # =====================================================================
